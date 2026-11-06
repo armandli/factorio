@@ -1,0 +1,39 @@
+[project]
+name = "factorio-agent"
+version = "0.1.0"
+description = "RL agents for the Factorio Learning Environment"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "factorio-learning-environment>=0.4.3",
+    # FLE 0.4.3 imports a2a.types.TextPart, which was removed in a2a-sdk 1.x
+    "a2a-sdk<1",
+    "numpy>=2.5.4",
+    "torch>=2.15.0",
+]
+
+[project.scripts]
+factorio-agent = "factorio_agent.cli:main"
+
+[dependency-groups]
+dev = [
+    "marimo>=0.25.2",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+    "typer>=0.28.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/factorio_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::SyntaxWarning"]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["notebooks"]
