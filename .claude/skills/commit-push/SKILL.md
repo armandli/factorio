@@ -48,7 +48,7 @@ Create the commit using a HEREDOC to ensure correct formatting:
 git commit -m "$(cat <<'EOF'
 <commit message here>
 
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 EOF
 )"
 ```
