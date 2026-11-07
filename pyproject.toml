@@ -14,6 +14,8 @@ dependencies = [
 
 [project.scripts]
 factorio-agent = "factorio_agent.cli:main"
+factorio-train = "factorio_agent.rl.train:main"
+factorio-monitor = "factorio_agent.rl.monitor:main"
 
 [dependency-groups]
 dev = [
@@ -21,6 +23,9 @@ dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.4",
     "typer>=0.28.0",
+]
+train = [
+    "tensorboard>=2.21.0",
 ]
 
 [build-system]

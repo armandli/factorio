@@ -2,6 +2,7 @@
 
 uv run factorio-agent --list
 uv run factorio-agent --env iron_ore_throughput --agent policy --steps 10
+uv run factorio-agent --checkpoint runs/ppo-.../checkpoint-final.pt
 """
 
 import argparse
@@ -19,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--env", default="iron_ore_throughput", help="FLE task / env id")
     parser.add_argument("--agent", choices=sorted(AGENTS), default="policy")
+    parser.add_argument("--checkpoint", help="play a trained factorio-train checkpoint instead")
     parser.add_argument("--steps", type=int, default=10, help="max steps in the episode")
     parser.add_argument("--run-idx", type=int, default=0, help="which Factorio container to use")
     parser.add_argument("--list", action="store_true", help="list available env ids and exit")
@@ -39,7 +41,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Factorio containers: {', '.join(containers)}")
 
     env = fenv.make_env(args.env, run_idx=args.run_idx)
-    agent = AGENTS[args.agent]()
+    if args.checkpoint:
+        from factorio_agent.rl import load_agent
+
+        agent = load_agent(args.checkpoint)
+    else:
+        agent = AGENTS[args.agent]()
 
     def show(r: fenv.StepRecord) -> None:
         status = "ERROR" if r.error else "ok"

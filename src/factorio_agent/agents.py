@@ -80,10 +80,9 @@ class PolicyNet(nn.Module):
 
 
 class PolicyAgent(Agent):
-    """Samples macro-actions from an (untrained) PyTorch policy network.
+    """Samples macro-actions from a PyTorch policy network.
 
-    Weights are randomly initialised; this is the hook where an RL algorithm (e.g. PPO)
-    would plug in by training `self.net`.
+    Weights are random unless `net` comes from training (`factorio-train ppo`).
     """
 
     def __init__(self, net: PolicyNet | None = None, seed: int | None = None, device: str = "cpu"):
