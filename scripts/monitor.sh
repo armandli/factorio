@@ -34,7 +34,7 @@ dashboard() {
   section "Factorio containers"
   if docker info >/dev/null 2>&1; then
     docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' \
-      $(docker ps -q --filter name=cluster-factorio_) 2>/dev/null \
+      $(docker ps -q --filter name=-factorio_) 2>/dev/null \
       || echo "(none running)"
   else
     echo "docker daemon is not running"

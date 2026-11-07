@@ -39,6 +39,10 @@ brew install docker colima
 colima start --cpu 4 --memory 8 --vm-type vz --vz-rosetta
 ```
 
+On Windows/WSL 2 with Docker Desktop, enable *Settings → Resources → WSL Integration* for your
+distro (then `wsl --shutdown` and reopen). Without it, `docker` in WSL is a stub that only
+prints "The command 'docker' could not be found in this WSL 2 distro".
+
 If image pulls fail with `docker-credential-desktop: executable file not found`, remove the
 `"credsStore": "desktop"` line from `~/.docker/config.json` (left over from Docker Desktop).
 `fle cluster start` still reports success when the pull fails, so check `docker ps`.

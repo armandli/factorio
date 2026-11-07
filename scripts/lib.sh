@@ -23,7 +23,16 @@ cd "$REPO_ROOT"
 log() { echo "[$(date '+%F %T')] $*"; }
 die() { log "error: $*" >&2; exit 1; }
 
-container_name() { echo "cluster-factorio_$1-1"; }
+# Compose names containers <project>-factorio_<i>-1, where <project> is the directory holding
+# FLE's compose file ("cluster" for fle/cluster/ via `fle cluster start`; "fle" if it lives in
+# ~/.local/state/fle), so match any project prefix.
+FACTORIO_NAME_RE='^[A-Za-z0-9_.-]+-factorio_[0-9]+-1$'
+container_name() {
+  docker ps -a --format '{{.Names}}' | grep -E "^[A-Za-z0-9_.-]+-factorio_$1-1\$" | head -1 || true
+}
+container_running() {
+  docker ps --format '{{.Names}}' | grep -qE "^[A-Za-z0-9_.-]+-factorio_$1-1\$"
+}
 
 setup_python() {
   command -v uv >/dev/null || die "uv is not installed (https://docs.astral.sh/uv/)"
@@ -49,10 +58,10 @@ ensure_cluster() {
   command -v docker >/dev/null || die "docker is not installed"
   docker info >/dev/null 2>&1 || die "docker daemon is not running"
   for ((i = first; i < needed; i++)); do
-    docker ps --format '{{.Names}}' | grep -qx "$(container_name "$i")" || missing=1
+    container_running "$i" || missing=1
   done
   if ((missing)); then
-    running=$(docker ps --format '{{.Names}}' | grep -cE '^cluster-factorio_[0-9]+-1$' || true)
+    running=$(docker ps --format '{{.Names}}' | grep -cE "$FACTORIO_NAME_RE" || true)
     local total=$((needed > running ? needed : running))
     log "starting Factorio cluster with $total container(s)"
     uv run fle cluster start -n "$total"
@@ -66,6 +75,7 @@ wait_for_rcon() {
   local first=$1 n=$2 since=${3:-} deadline=$((SECONDS + 300)) name
   for ((i = first; i < first + n; i++)); do
     name=$(container_name "$i")
+    [[ -n "$name" ]] || die "no container for Factorio instance $i"
     until docker logs ${since:+--since "$since"} "$name" 2>&1 \
         | grep -q "Starting RCON interface"; do
       ((SECONDS < deadline)) || die "$name did not open RCON within 5 minutes"
