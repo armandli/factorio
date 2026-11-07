@@ -69,11 +69,46 @@ uv run factorio-train ppo --mock --total-steps 20000 --num-envs 4  # offline moc
 uv run factorio-train dqn --total-steps 2000                       # real FLE server
 uv run factorio-train mcgs --num-envs 2 --num-simulations 64       # needs `fle cluster start -n 2`
 uv run factorio-train ppo --help                                   # every hyperparameter is a flag
-uv run factorio-agent --checkpoint runs/<run>/checkpoint-final.pt  # play a trained agent
+uv run factorio-agent --checkpoint runs/<run>/checkpoint-best.pt   # play a trained agent
 ```
 
 Each run writes `runs/<algo>-<time>/` with `config.json`, `metrics.jsonl` and checkpoints.
 `--resume <checkpoint>` continues training (hyperparameters come from the command line).
+
+### Is it improving? Evaluation, baselines and the best checkpoint
+
+Training returns come from the *exploring* policy (PPO samples, DQN is epsilon-greedy, MCGS
+adds search noise), so they are noisy and lag behind what the agent can actually do. With
+`--eval-every N` (on by default in `scripts/`, `EVAL_EVERY=4000`):
+
+- every N env steps the current weights are snapshotted and played for `--eval-episodes`
+  episodes without exploration, on their own env (container `FIRST_CONTAINER + NUM_ENVS`, or
+  `--eval-container`), in a background thread, so training doesn't wait;
+- the random and scripted agents are played once per run on the same env as baselines
+  (`baselines.json`);
+- the snapshot with the best mean eval return is saved as `checkpoint-best.pt` (`best.json`),
+  and the final weights get one last evaluation.
+
+Results go to the console, `metrics.jsonl` (`eval_return`, `eval_vs_scripted`, ...),
+TensorBoard (`eval/vs_baselines` overlays policy and baselines), and `factorio-monitor`, which
+shows eval/best/baseline columns, the eval history, whether the best beats the scripted agent,
+and warns when 5 evaluations pass without a new best. `factorio-eval` compares any checkpoints
+against the baselines afterwards:
+
+```bash
+uv run factorio-train dqn --mock --total-steps 3000 --eval-every 500       # try it offline
+uv run factorio-eval runs/ppo-*/checkpoint-best.pt runs/dqn-*/checkpoint-best.pt --container 0
+```
+
+Each run directory then holds:
+
+| File | Contents |
+| --- | --- |
+| `checkpoint-<step>.pt` | periodic (last `--keep-checkpoints`), with replay buffers, for resuming |
+| `checkpoint-final.pt` | end of training |
+| `checkpoint-best.pt`, `best.json` | best evaluated weights (no replay buffer) and their scores |
+| `baselines.json` | random / scripted baseline returns |
+| `config.json`, `metrics.jsonl`, `tb/` | hyperparameters, per-iteration metrics, TensorBoard |
 
 | Algorithm | Module | Notes |
 | --- | --- | --- |
@@ -104,13 +139,13 @@ Docker and uv:
 ```bash
 scripts/train_ppo.sh                      # foreground; also train_dqn.sh, train_mcgs.sh
 DETACH=1 NUM_ENVS=16 scripts/train_mcgs.sh --num-simulations 128   # background, extra flags
-scripts/train_all.sh                      # PPO + DQN + MCGS in the background, 4 containers each
+scripts/train_all.sh                      # PPO + DQN + MCGS in the background, 4+1 containers each
 RUN_NAME=ppo-20261106-120000 scripts/train_ppo.sh                  # resume a stopped run
 scripts/stop.sh ppo-20261106-120000       # or --all; the trainer checkpoints before exiting
 
 scripts/monitor.sh                        # dashboard: GPU, containers, processes, run progress
 scripts/tensorboard.sh                    # then: ssh -N -L 6006:127.0.0.1:6006 <gpu-host>
-uv run factorio-monitor runs/<run>        # one run: latest metrics and return curve
+uv run factorio-monitor runs/<run>        # one run: metrics, return curve, eval vs baselines
 ```
 
 The train scripts install the `train` dependency group (TensorBoard), check for CUDA, and start
@@ -118,9 +153,10 @@ enough Factorio containers. If `factorio-train` crashes (for example, a server s
 responding), they restart that run's containers and resume from the newest checkpoint, up to
 `MAX_RESTARTS` times. Checkpoints include the replay buffer, so DQN and MCGS resume exactly.
 Settings are environment variables (`NUM_ENVS`, `TOTAL_STEPS`, `FIRST_CONTAINER`, `ENV_ID`,
-`ERROR_PENALTY`, ...; see `scripts/lib.sh`), plus any `factorio-train` flag as an argument.
-Runs that share a machine need disjoint container ranges (`FIRST_CONTAINER`); `train_all.sh`
-handles this. Budget about 1 CPU core and 1 GB of RAM per container. The networks are small
+`ERROR_PENALTY`, `EVAL_EVERY`, `EVAL_EPISODES`, ...; see `scripts/lib.sh`), plus any
+`factorio-train` flag as an argument. Each run uses `NUM_ENVS` containers plus one for
+evaluation (`EVAL_EVERY=0` turns it off). Runs that share a machine need disjoint container
+ranges (`FIRST_CONTAINER`); `train_all.sh` handles this. Budget about 1 CPU core and 1 GB of RAM per container. The networks are small
 and FLE steps are the bottleneck, so the GPU mostly speeds up DQN and MCGS gradient updates.
 
 ## Notebook

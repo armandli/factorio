@@ -18,7 +18,9 @@ except ImportError:  # tensorboard is in the optional `train` dependency group
     SummaryWriter = None
 
 from factorio_agent.agents import Agent
-from factorio_agent.rl.envs import VecMacroEnv
+from factorio_agent.rl.buffers import ReplayBuffer
+from factorio_agent.rl.envs import MacroEnv, VecMacroEnv, make_eval_env
+from factorio_agent.rl.evaluate import Evaluator, eval_metrics, format_eval
 
 
 @dataclass
@@ -48,6 +50,18 @@ class TrainConfig:
     checkpoint_every: int = 0  # env steps between checkpoints (0: only at the end)
     keep_checkpoints: int = 3  # periodic checkpoints kept (final one always kept)
     tensorboard: bool = True  # also log to TensorBoard if it is installed
+    # evaluation (see rl/evaluate.py): no-exploration episodes on a dedicated env
+    eval_every: int = 0  # env steps between evaluations (0: off)
+    eval_episodes: int = 3  # episodes per evaluation
+    eval_container: int = -1  # Factorio container for evaluation (-1: first_container + num_envs)
+    eval_baselines: bool = True  # also evaluate the random and scripted agents once per run
+
+    def resolved_eval_container(self) -> int:
+        return (
+            self.eval_container
+            if self.eval_container >= 0
+            else self.first_container + self.num_envs
+        )
 
 
 def resolve_device(name: str) -> torch.device:
@@ -103,8 +117,9 @@ class Trainer(ABC):
         self.device = resolve_device(cfg.device)
         self.global_step = 0
         self.iteration = 0
-        random.seed(cfg.seed)
-        torch.manual_seed(cfg.seed)
+        if envs is not None:  # not for inference/eval copies, which must not reseed globally
+            random.seed(cfg.seed)
+            torch.manual_seed(cfg.seed)
 
     @abstractmethod
     def train_iteration(self) -> dict[str, float]: ...
@@ -116,8 +131,12 @@ class Trainer(ABC):
     def modules(self) -> dict[str, Any]:
         """Objects with state_dict()/load_state_dict(): networks, optimizers, ..."""
 
-    def train(self) -> Path:
+    def train(self, eval_env: MacroEnv | None = None) -> Path:
         """Train until `total_steps` env steps; returns the final checkpoint path.
+
+        With `eval_every`, the policy is evaluated on `eval_env` (built from the config if not
+        given) alongside training, the best snapshot is kept as `checkpoint-best.pt`, and the
+        final weights get one last evaluation.
 
         If training raises (e.g. a Factorio server stops responding), a checkpoint is saved
         before re-raising so the run can be resumed with `--resume`.
@@ -130,7 +149,11 @@ class Trainer(ABC):
         writer = SummaryWriter(str(run / "tb")) if cfg.tensorboard and SummaryWriter else None
         episodes: list[float] = []
         start, start_step = time.time(), self.global_step
-        last_checkpoint = self.global_step
+        last_checkpoint = last_eval = self.global_step
+        own_eval_env = False
+        if cfg.eval_every and eval_env is None:
+            eval_env, own_eval_env = self._make_eval_env(), True
+        evaluator = self._make_evaluator(eval_env, run) if cfg.eval_every else None
         try:
             with open(run / "metrics.jsonl", "a") as log:
                 while self.global_step < cfg.total_steps:
@@ -147,21 +170,23 @@ class Trainer(ABC):
                     metrics["steps_per_sec"] = (self.global_step - start_step) / (
                         time.time() - start
                     )
-                    if writer:
-                        for k, v in metrics.items():
-                            writer.add_scalar(k, v, self.global_step)
-                    metrics.update(
-                        iteration=self.iteration, global_step=self.global_step, time=time.time()
-                    )
-                    log.write(json.dumps(metrics) + "\n")
-                    log.flush()
-                    if self.iteration % cfg.log_every == 0:
-                        print(format_metrics(metrics, skip={"time"}), flush=True)
+                    if evaluator:
+                        if self.global_step - last_eval >= cfg.eval_every:
+                            evaluator.submit(self.checkpoint_dict(include_buffers=False))
+                            last_eval = self.global_step
+                        metrics.update(self._eval_results(evaluator, evaluator.poll(), writer))
+                    self._record(metrics, log, writer, echo=self.iteration % cfg.log_every == 0)
                     if cfg.checkpoint_every and (
                         self.global_step - last_checkpoint >= cfg.checkpoint_every
                     ):
                         self._checkpoint(run)
                         last_checkpoint = self.global_step
+                if evaluator:
+                    print("final evaluation...", flush=True)
+                    final = evaluator.finish(self.checkpoint_dict(include_buffers=False))
+                    metrics = self._eval_results(evaluator, final, writer)
+                    if metrics:
+                        self._record(metrics, log, writer, echo=False)
         except BaseException:
             print(f"training stopped at step {self.global_step}; saving a checkpoint", flush=True)
             self._checkpoint(run)
@@ -169,6 +194,8 @@ class Trainer(ABC):
         finally:
             if writer:
                 writer.close()
+            if own_eval_env:
+                eval_env.close()
         path = run / "checkpoint-final.pt"
         self.save(path)
         recent = episodes[-20:]
@@ -177,25 +204,111 @@ class Trainer(ABC):
                 f"done: {len(episodes)} episodes, mean return (last {len(recent)}) "
                 f"{sum(recent) / len(recent):.3f}"
             )
+        if evaluator and evaluator.best:
+            print(
+                f"best eval return {evaluator.best['return']:.3f} at step "
+                f"{evaluator.best['step']}: {run / 'checkpoint-best.pt'}"
+            )
         print(f"checkpoint: {path}")
         return path
+
+    def _record(self, metrics: dict[str, float], log, writer, echo: bool) -> None:
+        """One metrics.jsonl line (+ TensorBoard scalars, + a console line if `echo`)."""
+        if writer:
+            for k, v in metrics.items():
+                if not k.startswith(("eval_", "baseline_")):  # logged by _eval_results
+                    writer.add_scalar(k, v, self.global_step)
+        metrics.update(iteration=self.iteration, global_step=self.global_step, time=time.time())
+        log.write(json.dumps(metrics) + "\n")
+        log.flush()
+        if echo:
+            print(format_metrics(metrics, skip={"time"}), flush=True)
+
+    def _eval_results(self, evaluator: Evaluator, results, writer) -> dict[str, float]:
+        """Print finished evaluations, log them to TensorBoard at the evaluated step, and
+        return the newest policy result's metrics for metrics.jsonl."""
+        metrics: dict[str, float] = {}
+        for res in results:
+            print(format_eval(res, evaluator), flush=True)
+            if res.name != "policy":
+                continue
+            metrics = eval_metrics(res, evaluator)
+            if writer:
+                step = res.step
+                writer.add_scalar("eval/return", res.mean_return, step)
+                writer.add_scalar("eval/return_std", res.std_return, step)
+                writer.add_scalar("eval/errors", res.mean_errors, step)
+                writer.add_scalar("eval/best_return", evaluator.best["return"], step)
+                writer.add_scalars(
+                    "eval/vs_baselines",
+                    {"policy": res.mean_return}
+                    | {b: s["return"] for b, s in evaluator.baselines.items()},
+                    step,
+                )
+                for b, s in evaluator.baselines.items():
+                    writer.add_scalar(f"eval/policy_minus_{b}", res.mean_return - s["return"], step)
+        return metrics
+
+    def _make_eval_env(self) -> MacroEnv:
+        cfg = self.cfg
+        return make_eval_env(
+            cfg.env_id,
+            cfg.resolved_eval_container(),
+            cfg.max_episode_steps,
+            cfg.error_penalty,
+            mock=cfg.mock,
+            seed=cfg.seed,
+        )
+
+    def _make_evaluator(self, env: MacroEnv, run: Path) -> Evaluator:
+        cfg = self.cfg
+        # a weights-only copy of this trainer for the eval thread, built here (main thread)
+        # and reloaded for each snapshot
+        player = type(self)(cfg, None)
+
+        def agent_from_checkpoint(ckpt: dict[str, Any]) -> Agent:
+            player.load(ckpt)
+            return player.make_agent()
+
+        return Evaluator(
+            env,
+            run,
+            cfg.eval_episodes,
+            agent_from_checkpoint,
+            baselines=cfg.eval_baselines,
+            baseline_key={
+                "env_id": cfg.env_id,
+                "mock": cfg.mock,
+                "max_episode_steps": cfg.max_episode_steps,
+                "error_penalty": cfg.error_penalty,
+                "episodes": cfg.eval_episodes,
+                "seed": cfg.seed,
+            },
+            seed=cfg.seed,
+        )
 
     def _checkpoint(self, run: Path) -> None:
         self.save(run / f"checkpoint-{self.global_step}.pt")
         for old in periodic_checkpoints(run)[: -self.cfg.keep_checkpoints or None]:
             old.unlink()
 
-    def save(self, path: str | Path) -> None:
-        torch.save(
-            {
-                "algo": self.name,
-                "config": asdict(self.cfg),
-                "global_step": self.global_step,
-                "iteration": self.iteration,
-                "state": {k: m.state_dict() for k, m in self.modules().items()},
+    def checkpoint_dict(self, include_buffers: bool = True) -> dict[str, Any]:
+        """What `save` writes. Without buffers it is small enough to snapshot for evaluation
+        (and the result still loads with `load_trainer` / `load_agent`)."""
+        return {
+            "algo": self.name,
+            "config": asdict(self.cfg),
+            "global_step": self.global_step,
+            "iteration": self.iteration,
+            "state": {
+                k: m.state_dict()
+                for k, m in self.modules().items()
+                if include_buffers or not isinstance(m, ReplayBuffer)
             },
-            path,
-        )
+        }
+
+    def save(self, path: str | Path) -> None:
+        torch.save(self.checkpoint_dict(), path)
 
     def load(self, ckpt: dict[str, Any]) -> None:
         for k, m in self.modules().items():

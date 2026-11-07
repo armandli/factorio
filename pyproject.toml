@@ -16,6 +16,7 @@ dependencies = [
 factorio-agent = "factorio_agent.cli:main"
 factorio-train = "factorio_agent.rl.train:main"
 factorio-monitor = "factorio_agent.rl.monitor:main"
+factorio-eval = "factorio_agent.rl.evaluate:main"
 
 [dependency-groups]
 dev = [

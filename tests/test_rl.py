@@ -254,3 +254,77 @@ def test_monitor_summarizes_runs(tmp_path):
     assert "ppo" in out and "mcgs" in out and "finished" in out
     assert "episode return" in render(tmp_path / "mcgs", stale_after=600)
     assert sparkline([0.0, 1.0, 2.0]) == "▁▄█"
+
+
+def test_evaluate_baselines_on_mock():
+    from factorio_agent.agents import ScriptedAgent
+    from factorio_agent.rl import evaluate, make_eval_env
+
+    env = make_eval_env(mock=True, max_episode_steps=5)
+    res = evaluate(ScriptedAgent(), env, episodes=2, name="scripted")
+    assert res.lengths == [5, 5] and len(res.returns) == 2
+    assert res.mean_return == sum(res.returns) / 2 and res.std_return >= 0
+
+
+def test_training_with_eval_keeps_best_checkpoint(tmp_path, capsys):
+    import json
+
+    from factorio_agent.rl.evaluate import main as eval_main
+
+    cls = ALGORITHMS["dqn"]
+    cfg = cls.config_cls(
+        mock=True,
+        total_steps=64,
+        max_episode_steps=8,
+        device="cpu",
+        run_dir=str(tmp_path),
+        run_name="ev",
+        eval_every=16,
+        eval_episodes=1,
+        **SMOKE["dqn"],
+    )
+    envs = make_vec_env(mock=True, max_episode_steps=8)
+    cls(cfg, envs).train()
+    run = tmp_path / "ev"
+    out = capsys.readouterr().out
+    assert "baseline random" in out and "baseline scripted" in out and "eval @ step" in out
+
+    rows = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
+    evals = [r for r in rows if "eval_return" in r]
+    steps = [r["eval_step"] for r in evals]
+    assert steps == sorted(set(steps)) and steps[-1] == 64  # final weights evaluated once
+    best = json.loads((run / "best.json").read_text())
+    assert best["return"] == max(r["eval_return"] for r in evals)
+    assert all("baseline_scripted" in r and "eval_vs_scripted" in r for r in evals)
+
+    ckpt = torch.load(run / "checkpoint-best.pt", weights_only=False)
+    assert ckpt["global_step"] == best["step"] and "buffer" not in ckpt["state"]
+    assert load_agent(run / "checkpoint-best.pt").act(MockFactorioEnv().reset()[0]) in MACRO_ACTIONS
+
+    s = summarize(run)
+    assert s.best_eval["step"] == best["step"] and set(s.baselines) == {"random", "scripted"}
+    assert "scripted baseline" in render(run, stale_after=600)
+
+    # resuming reuses the cached baselines and competes against the earlier best
+    cfg2 = dataclasses.replace(cfg, total_steps=80)
+    resumed = load_trainer(run / "checkpoint-final.pt", envs, **dataclasses.asdict(cfg2))
+    resumed.train()
+    assert "baseline random" not in capsys.readouterr().out
+    assert json.loads((run / "best.json").read_text())["return"] >= best["return"]
+    envs.close()
+
+    assert eval_main([str(run / "checkpoint-best.pt"), "--mock", "--episodes", "1"]) == 0
+    table = capsys.readouterr().out
+    assert "scripted" in table and "checkpoint-best.pt" in table
+
+
+def test_evaluator_surfaces_worker_errors(tmp_path):
+    from factorio_agent.rl import Evaluator, make_eval_env
+
+    def broken(ckpt):
+        raise ConnectionError("eval server went away")
+
+    ev = Evaluator(make_eval_env(mock=True), tmp_path, 1, broken, baselines=False)
+    ev.submit({"global_step": 1, "state": {}})
+    with pytest.raises(RuntimeError, match="evaluation failed"):
+        ev.finish()

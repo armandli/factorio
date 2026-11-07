@@ -166,3 +166,26 @@ def make_vec_env(
         raw = [fenv.make_env(env_id, run_idx=first_container + i) for i in range(num_envs)]
         action_cls = fenv.Action
     return VecMacroEnv([MacroEnv(e, action_cls, max_episode_steps, error_penalty) for e in raw])
+
+
+def make_eval_env(
+    env_id: str = "iron_ore_throughput",
+    container: int = 0,
+    max_episode_steps: int = 50,
+    error_penalty: float = 0.0,
+    mock: bool = False,
+    seed: int = 0,
+) -> MacroEnv:
+    """A single env for evaluation, on Factorio container `container` (or a mock env with
+    its own seed). Keep it off the training containers so evaluation can run alongside."""
+    if mock:
+        from factorio_agent.rl.mock_env import CodeAction, MockFactorioEnv
+
+        return MacroEnv(
+            MockFactorioEnv(seed=seed + 10_000), CodeAction, max_episode_steps, error_penalty
+        )
+    from factorio_agent import env as fenv
+
+    fenv.check_cluster()
+    raw = fenv.make_env(env_id, run_idx=container)
+    return MacroEnv(raw, fenv.Action, max_episode_steps, error_penalty)

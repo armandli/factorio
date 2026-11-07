@@ -10,6 +10,9 @@
 #   ERROR_PENALTY     reward subtracted when a program errors              [0.1]
 #   DEVICE            torch device                                         [cuda]
 #   MAX_RESTARTS      restart-and-resume attempts after a crash            [20]
+#   EVAL_EVERY        env steps between no-exploration evaluations, on one extra container
+#                     (FIRST_CONTAINER+NUM_ENVS); keeps checkpoint-best.pt; 0 turns it off [4000]
+#   EVAL_EPISODES     episodes per evaluation (and per baseline)           [3]
 #   DETACH=1          run in the background (logs to runs/<RUN_NAME>/train.log)
 
 set -euo pipefail
@@ -31,7 +34,7 @@ container_name() {
   docker ps -a --format '{{.Names}}' | grep -E "^[A-Za-z0-9_.-]+-factorio_$1-1\$" | head -1 || true
 }
 container_running() {
-  docker ps --format '{{.Names}}' | grep -qE "^[A-Za-z0-9_.-]+-factorio_$1-1\$"
+  docker ps --format '{{.Names}}' | grep -E "^[A-Za-z0-9_.-]+-factorio_$1-1\$" >/dev/null
 }
 
 setup_python() {
@@ -70,14 +73,15 @@ ensure_cluster() {
 }
 
 # wait_for_rcon <first> <n> [since]: only log lines after `since` count (docker logs keeps
-# lines from before a restart).
+# lines from before a restart). grep reads all input (no -q): with pipefail, -q exiting early
+# SIGPIPEs `docker logs` on long logs and the pipeline "fails" even though the line is there.
 wait_for_rcon() {
   local first=$1 n=$2 since=${3:-} deadline=$((SECONDS + 300)) name
   for ((i = first; i < first + n; i++)); do
     name=$(container_name "$i")
     [[ -n "$name" ]] || die "no container for Factorio instance $i"
     until docker logs ${since:+--since "$since"} "$name" 2>&1 \
-        | grep -q "Starting RCON interface"; do
+        | grep -F "Starting RCON interface" >/dev/null; do
       ((SECONDS < deadline)) || die "$name did not open RCON within 5 minutes"
       sleep 3
     done
@@ -92,6 +96,11 @@ restart_containers() {
   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   docker restart "${names[@]}" >/dev/null
   wait_for_rcon "$first" "$n" "$since"
+}
+
+# containers one run occupies: NUM_ENVS for training, plus one for evaluation if enabled
+run_containers() {
+  echo $((${NUM_ENVS:-1} + (${EVAL_EVERY:-4000} > 0 ? 1 : 0)))
 }
 
 latest_periodic_checkpoint() {
@@ -121,13 +130,18 @@ train() {
   echo $$ >"$run_dir/train.pid"
 
   local first=${FIRST_CONTAINER:-0} n=${NUM_ENVS:-1} max_restarts=${MAX_RESTARTS:-20}
+  local total eval_every=${EVAL_EVERY:-4000}
+  total=$(run_containers)
   local attempt=0 status child stopping=0
   trap 'stopping=1; [[ -n "${child:-}" ]] && kill -TERM "$child" 2>/dev/null' INT TERM
 
   log "run '$RUN_NAME': $algo on ${ENV_ID:-iron_ore_throughput}, envs $first..$((first + n - 1))"
+  if ((eval_every > 0)); then
+    log "evaluation every $eval_every steps on container $((first + n))"
+  fi
   setup_python
   check_gpu
-  ensure_cluster "$first" "$n"
+  ensure_cluster "$first" "$total"
 
   while true; do
     if [[ -f "$run_dir/checkpoint-final.pt" ]]; then
@@ -149,6 +163,9 @@ train() {
       --max-episode-steps "${MAX_EPISODE_STEPS:-50}" \
       --error-penalty "${ERROR_PENALTY:-0.1}" \
       --device "${DEVICE:-cuda}" \
+      --eval-every "$eval_every" \
+      --eval-episodes "${EVAL_EPISODES:-3}" \
+      --eval-container "$((first + n))" \
       "$@" ${resume[@]+"${resume[@]}"} &
     child=$!
     status=0
@@ -170,6 +187,6 @@ train() {
     fi
     log "factorio-train exited with $status (restart $attempt/$max_restarts in 30s)"
     sleep 30
-    restart_containers "$first" "$n"
+    restart_containers "$first" "$total"
   done
 }

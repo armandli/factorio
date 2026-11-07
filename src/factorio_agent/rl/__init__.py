@@ -11,7 +11,8 @@ import torch
 from factorio_agent.agents import Agent
 from factorio_agent.rl.common import TrainConfig, Trainer
 from factorio_agent.rl.dqn import DQNConfig, DQNTrainer
-from factorio_agent.rl.envs import MacroEnv, VecMacroEnv, make_vec_env
+from factorio_agent.rl.envs import MacroEnv, VecMacroEnv, make_eval_env, make_vec_env
+from factorio_agent.rl.evaluate import EvalResult, Evaluator, evaluate
 from factorio_agent.rl.mcgs import MCGSConfig, MCGSTrainer
 from factorio_agent.rl.ppo import PPOConfig, PPOTrainer
 
@@ -21,6 +22,8 @@ __all__ = [
     "ALGORITHMS",
     "DQNConfig",
     "DQNTrainer",
+    "EvalResult",
+    "Evaluator",
     "MCGSConfig",
     "MCGSTrainer",
     "MacroEnv",
@@ -29,8 +32,10 @@ __all__ = [
     "TrainConfig",
     "Trainer",
     "VecMacroEnv",
+    "evaluate",
     "load_agent",
     "load_trainer",
+    "make_eval_env",
     "make_vec_env",
 ]
 
