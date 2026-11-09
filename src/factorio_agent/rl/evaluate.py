@@ -1,13 +1,13 @@
 """Evaluation: play a policy without exploration, compare it with baselines, keep the best.
 
-Training returns come from the *exploring* policy (PPO samples, DQN is epsilon-greedy, MCGS
+Training returns come from the *exploring* policy (PPO samples, DQN uses noisy layers, MCGS
 adds Dirichlet noise and samples by temperature), so they are noisy and lag behind what the
 agent can actually do. With `--eval-every N` the trainer snapshots its weights every N env
 steps and an `Evaluator` plays `--eval-episodes` episodes with them on its own env (a separate
 Factorio container) in a background thread, so training keeps going:
 
-- PPO samples from its policy, DQN acts greedily, MCGS plays the most-visited action of a
-  noise-free search (each algorithm's `make_agent`);
+- PPO samples from its policy, DQN acts greedily on its mean weights (no noise), MCGS plays the
+  most-visited action of a noise-free search (each algorithm's `make_agent`);
 - the random and scripted agents are evaluated once per run on the same env, as fixed
   reference points (`baselines.json`, reused when a run is resumed);
 - the snapshot with the best mean eval return is saved as `checkpoint-best.pt` (`best.json`

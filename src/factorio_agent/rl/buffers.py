@@ -1,4 +1,5 @@
-"""Experience storage: an on-policy rollout buffer (PPO) and a replay buffer (DQN, MCGS)."""
+"""Experience storage: an on-policy rollout buffer (PPO), a replay buffer (MCGS, uniform DQN)
+and a prioritized replay buffer (Rainbow DQN)."""
 
 from collections import deque
 from collections.abc import Iterator
@@ -101,6 +102,105 @@ class ReplayBuffer:
             self.data[k][:size] = v[:size]
         self.size = size
         self.pos = state["pos"] % self.capacity
+
+
+class SumTree:
+    """Binary tree of priorities: batched O(log N) updates and proportional lookups.
+
+    Leaves are padded to a power of two so that they all sit at the same depth, which lets a
+    batch move up (or down) the tree one level at a time.
+    """
+
+    def __init__(self, capacity: int):
+        self.leaves = 1 << max(capacity - 1, 0).bit_length()
+        self.tree = torch.zeros(2 * self.leaves, dtype=torch.float64)
+
+    @property
+    def total(self) -> float:
+        return self.tree[1].item()
+
+    def priority(self, idx: torch.Tensor) -> torch.Tensor:
+        return self.tree[idx + self.leaves]
+
+    def update(self, idx: torch.Tensor, priority: torch.Tensor) -> None:
+        node = idx + self.leaves
+        self.tree[node] = priority.to(self.tree.dtype)
+        while node[0] > 1:
+            # recomputed from the children, so rounding errors cannot accumulate
+            node = torch.unique(node // 2)
+            self.tree[node] = self.tree[2 * node] + self.tree[2 * node + 1]
+
+    def find(self, mass: torch.Tensor) -> torch.Tensor:
+        """For each value in [0, total), the leaf whose cumulative priority interval holds it."""
+        mass = mass.to(self.tree.dtype).clone()
+        node = torch.ones_like(mass, dtype=torch.long)
+        while node[0] < self.leaves:
+            left = 2 * node
+            left_mass = self.tree[left]
+            # rounding can leave `mass` just past the last positive leaf: never step into an
+            # empty subtree, whose transitions do not exist yet
+            right = (mass >= left_mass) & (self.tree[left + 1] > 0)
+            mass -= left_mass * right
+            node = left + right.long()
+        return node - self.leaves
+
+
+class PrioritizedReplayBuffer(ReplayBuffer):
+    """Proportional prioritized replay: P(i) = p_i / sum_k p_k, with p_i = (error_i + eps)^omega.
+
+    `sample` adds to the batch the sampled `index` (for `update_priorities`) and the importance
+    sampling `weight` (N * P(i))^-beta, scaled by the batch maximum so it only shrinks updates.
+    New transitions get the highest priority seen so far, so each is replayed soon after it
+    arrives.
+    """
+
+    PRIORITY_EPS = 1e-6  # keeps zero-error transitions sampleable
+
+    def __init__(self, capacity: int, omega: float = 0.5, **fields: tuple[int, ...]):
+        super().__init__(capacity, **fields)
+        self.omega = omega
+        self.tree = SumTree(capacity)
+        self.max_priority = 1.0
+
+    def add(self, **values: torch.Tensor | float) -> None:
+        idx = torch.tensor([self.pos])
+        super().add(**values)
+        self.tree.update(idx, torch.tensor([self.max_priority]))
+
+    def sample(
+        self, batch_size: int, device: torch.device | str = "cpu", beta: float = 1.0
+    ) -> dict[str, torch.Tensor]:
+        # stratified: one draw from each of batch_size equal-mass segments
+        total = self.tree.total
+        draws = torch.rand(batch_size, dtype=torch.float64)
+        idx = self.tree.find((torch.arange(batch_size) + draws) * total / batch_size)
+        weights = (self.size * self.tree.priority(idx) / total) ** -beta
+        batch = {name: buf[idx].to(device) for name, buf in self.data.items()}
+        batch["index"] = idx
+        batch["weight"] = (weights / weights.max()).to(device, torch.float32)
+        return batch
+
+    def update_priorities(self, idx: torch.Tensor, errors: torch.Tensor) -> None:
+        priority = (errors.detach().double().cpu() + self.PRIORITY_EPS) ** self.omega
+        self.max_priority = max(self.max_priority, priority.max().item())
+        self.tree.update(idx, priority)
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            **super().state_dict(),
+            "priorities": self.tree.priority(torch.arange(self.size)).clone(),
+            "max_priority": self.max_priority,
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        super().load_state_dict(state)
+        self.max_priority = state.get("max_priority", 1.0)
+        self.tree = SumTree(self.capacity)
+        if self.size:
+            # a buffer saved without priorities (uniform run): every transition starts equal
+            default = torch.full((self.size,), self.max_priority)
+            priorities = state.get("priorities", default)[: self.size]
+            self.tree.update(torch.arange(self.size), priorities)
 
 
 class NStepAccumulator:

@@ -77,7 +77,7 @@ Each run writes `runs/<algo>-<time>/` with `config.json`, `metrics.jsonl` and ch
 
 ### Is it improving? Evaluation, baselines and the best checkpoint
 
-Training returns come from the *exploring* policy (PPO samples, DQN is epsilon-greedy, MCGS
+Training returns come from the *exploring* policy (PPO samples, DQN uses noisy layers, MCGS
 adds search noise), so they are noisy and lag behind what the agent can actually do. With
 `--eval-every N` (on by default in `scripts/`, `EVAL_EVERY=4000`):
 
@@ -113,7 +113,7 @@ Each run directory then holds:
 | Algorithm | Module | Notes |
 | --- | --- | --- |
 | `ppo` | `rl/ppo.py` | Clipped PPO + GAE, bootstraps truncated episodes; trains `PolicyNet` |
-| `dqn` | `rl/dqn.py` | Double DQN, dueling head, n-step returns, Polyak target |
+| `dqn` | `rl/dqn.py` | Rainbow: double Q, prioritized replay, dueling, n-step, C51, noisy nets (see below) |
 | `mcgs` | `rl/mcgs.py`, `rl/search.py` | Model-based: Monte-Carlo **Graph** Search over a learned world model (AlphaZero-style policy/value targets) |
 
 MCGS is MCTS with a transposition table. States reached by different action orders share one
@@ -121,6 +121,29 @@ node and its value, which suits Factorio, where many macro-actions commute. The 
 predicts the next *feature vector* (not a latent), so states can be matched by rounding. Search
 takes any `SearchModel`, so a simulator-backed model (FLE game-state snapshots) could replace
 the learned one.
+
+`dqn` runs the full Rainbow agent by default. For leave-one-out ablation runs, use
+`--no-double`, `--no-prioritized`, `--no-dueling`, `--n-step 1`, `--no-distributional` (scalar
+Q-values and smooth L1 loss) or `--no-noisy` (epsilon-greedy). The `--no-distributional`,
+`--no-noisy` and `--no-dueling` flags, `--atoms` and `--hidden` change the network, so they can't
+be changed on `--resume`. Changing `--v-min`/`--v-max` on resume has no effect: the checkpoint's
+support is kept. Don't change `--reward-scale` on resume either: the buffer holds rewards at the
+old scale.
+
+The return support has to fit the returns. FLE rewards aren't clipped as in the paper, so
+`--reward-scale` (default 0.02, and 0.01 in `scripts/train_dqn.sh`) scales them to fit
+`--v-min`/`--v-max` (default -10 to 10). At 0.02 that covers raw returns of ±500. Watch
+`edge_mass` in `metrics.jsonl`, the share of target probability on the outermost atoms: if it
+stays high, returns are being clipped, so lower the scale. `q_mean` is reported in unscaled reward
+units, and `loss` is the KL divergence (|TD error| with `--no-distributional`).
+
+`--sigma0` defaults to 0.1, not the paper's 0.5. C51's action gaps are small compared with its
+atom spacing, and at 0.5 the noise swamped them on the mock env: the policy kept repeating an
+arbitrary action. 0.1 helps but doesn't cure this: over 10 held-out seeds at 10k mock steps, full
+Rainbow averaged 162 with 5 seeds below the scripted baseline (155), while `--no-noisy` averaged
+234 with every seed at 232 or above, and the previous DQN averaged 229. The mock needs no deep
+exploration, so this doesn't settle what's best on real FLE, but if a run gets stuck, try
+`--no-noisy` first. Noise is off in evaluation, so evals use the mean weights.
 
 Shared pieces: `rl/envs.py` (`MacroEnv`: int actions to featurized tensors, step limit, error
 penalty; `VecMacroEnv`: threaded envs, one Factorio container each, auto-reset),
