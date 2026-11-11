@@ -104,8 +104,8 @@ run_containers() {
 }
 
 latest_periodic_checkpoint() {
-  ls "$1"/checkpoint-*.pt 2>/dev/null | grep -E 'checkpoint-[0-9]+\.pt$' \
-    | sort -t- -k2 -n | tail -1 || true
+  # sort -V compares the step numbers numerically (checkpoint-8000 < checkpoint-10000)
+  ls "$1"/checkpoint-*.pt 2>/dev/null | grep -E '/checkpoint-[0-9]+\.pt$' | sort -V | tail -1 || true
 }
 
 # train <algo> [factorio-train flags...]

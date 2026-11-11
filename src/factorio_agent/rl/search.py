@@ -197,8 +197,10 @@ class MCGS:
     def _backup(
         self, path: list[tuple[Node, Edge]], leaf: Node, value: float, stats: MinMaxStats
     ) -> None:
-        leaf.visits += 1
-        leaf.value_sum += value
+        # a leaf reached through a cycle is already on the path and is updated there
+        if all(leaf is not node for node, _ in path):
+            leaf.visits += 1
+            leaf.value_sum += value
         g = value
         for node, edge in reversed(path):
             g = edge.reward + self.gamma * g
