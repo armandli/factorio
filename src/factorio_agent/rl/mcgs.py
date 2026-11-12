@@ -38,6 +38,10 @@ class MCGSConfig(TrainConfig):
     dirichlet_alpha: float = 0.3
     dirichlet_frac: float = 0.25
     temperature: float = 1.0  # sampling temperature over root visits while training
+    # evaluation plays the most-visited action (0) or samples visits at this temperature;
+    # greedy play can repeat one erroring action for a whole episode, since a failed action
+    # leaves the state, and so the search, unchanged
+    eval_temperature: float = 0.0
     buffer_size: int = 50_000
     batch_size: int = 64
     learning_starts: int = 200  # env steps of random play before searching / updating
@@ -50,14 +54,19 @@ class MCGSConfig(TrainConfig):
 
 
 class SearchAgent(Agent):
-    """Plays the most-visited root action of an MCGS search."""
+    """Plays the most-visited root action of a noise-free MCGS search, or with `temperature`
+    > 0 samples root visits (visits ** (1 / temperature))."""
 
-    def __init__(self, search: MCGS):
+    def __init__(self, search: MCGS, temperature: float = 0.0):
         self.search = search
+        self.temperature = temperature
 
     def act(self, obs: dict[str, Any]) -> MacroAction:
-        result = self.search.search(featurize(obs))
-        return MACRO_ACTIONS[int(result.policy.argmax())]
+        policy = self.search.search(featurize(obs)).policy
+        if self.temperature > 0:
+            probs = policy ** (1.0 / self.temperature)
+            return MACRO_ACTIONS[int(torch.multinomial(probs / probs.sum(), 1))]
+        return MACRO_ACTIONS[int(policy.argmax())]
 
 
 class MCGSTrainer(Trainer):
@@ -107,7 +116,7 @@ class MCGSTrainer(Trainer):
         return modules
 
     def make_agent(self) -> SearchAgent:
-        return SearchAgent(self.search)
+        return SearchAgent(self.search, self.cfg.eval_temperature)
 
     def _act(self, obs: torch.Tensor) -> tuple[int, torch.Tensor, float, int]:
         """Returns (action, search policy, root value, graph size)."""

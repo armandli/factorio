@@ -171,6 +171,22 @@ scripts/tensorboard.sh                    # then: ssh -N -L 6006:127.0.0.1:6006 
 uv run factorio-monitor runs/<run>        # one run: metrics, return curve, eval vs baselines
 ```
 
+To pick an algorithm by sample efficiency and then train it longer, unattended:
+
+```bash
+DETACH=1 scripts/tournament.sh            # phase 1: ppo/dqn/mcgs on 4 envs each for PHASE1_HOURS (2.5)
+                                          # pick:    factorio-compare ranks by return per env step
+                                          # phase 2: winner resumes on all containers for PHASE2_HOURS (6)
+STAMP=<stamp> DETACH=1 scripts/tournament.sh   # re-attach after a reboot / edit; skips live runs
+uv run factorio-compare runs/*-<stamp> --metric train   # the ranking, any time
+```
+
+It ranks by training-return AUC (`SELECT_METRIC=train`) because greedy evaluation (DQN, MCGS)
+can repeat one failing action for a whole episode, so eval returns compare eval modes rather
+than learning speed. For MCGS, `--eval-temperature 1.0` samples the search's visit counts in
+evaluation instead. Logs go to `runs/tournament-<stamp>/` (`compare.txt`, `winner.json`,
+`monitor.log`).
+
 The train scripts install the `train` dependency group (TensorBoard), check for CUDA, and start
 enough Factorio containers. If `factorio-train` crashes (for example, a server stops
 responding), they restart that run's containers and resume from the newest checkpoint, up to

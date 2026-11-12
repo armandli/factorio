@@ -18,6 +18,37 @@ with warnings.catch_warnings(), contextlib.redirect_stderr(io.StringIO()):
 
 from factorio_agent.agents import Agent
 
+
+def _serialise_slpp() -> None:
+    """FLE parses every RCON reply with slpp's module-level `slpp` instance, whose decode keeps
+    its cursor (text, at, ch) on the instance. VecMacroEnv steps envs in threads, so concurrent
+    replies (e.g. the ~90 KB research state every reset fetches) corrupt each other's parse, and
+    FLE raises "Could not save research state". Parsing is cheap next to a game step, so a lock
+    is enough."""
+    import functools
+    import threading
+
+    from slpp import SLPP
+
+    if getattr(SLPP, "_factorio_agent_locked", False):
+        return
+    lock = threading.RLock()
+
+    def locked(method):
+        @functools.wraps(method)
+        def wrapper(self, *args, **kwargs):
+            with lock:
+                return method(self, *args, **kwargs)
+
+        return wrapper
+
+    SLPP.decode = locked(SLPP.decode)
+    SLPP.encode = locked(SLPP.encode)
+    SLPP._factorio_agent_locked = True
+
+
+_serialise_slpp()
+
 __all__ = [
     "Action",
     "StepRecord",

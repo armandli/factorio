@@ -665,3 +665,22 @@ def test_evaluator_surfaces_worker_errors(tmp_path):
     ev.submit({"global_step": 1, "state": {}})
     with pytest.raises(RuntimeError, match="evaluation failed"):
         ev.finish()
+
+
+def test_mcgs_eval_temperature_samples_instead_of_argmax(monkeypatch):
+    from factorio_agent.actions import MACRO_ACTIONS
+    from factorio_agent.rl import mcgs
+
+    policy = torch.zeros(len(MACRO_ACTIONS))
+    policy[:2] = torch.tensor([0.6, 0.4])
+    search = type(
+        "FixedSearch", (), {"search": lambda self, obs: type("R", (), {"policy": policy})}
+    )
+    monkeypatch.setattr(mcgs, "featurize", lambda obs: torch.zeros(1))
+    first_two = {MACRO_ACTIONS[0].name, MACRO_ACTIONS[1].name}
+
+    greedy = mcgs.SearchAgent(search())
+    assert {greedy.act({}).name for _ in range(50)} == {MACRO_ACTIONS[0].name}
+    torch.manual_seed(0)
+    sampled = mcgs.SearchAgent(search(), temperature=1.0)
+    assert {sampled.act({}).name for _ in range(200)} == first_two
